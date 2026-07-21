@@ -139,7 +139,8 @@ age_order = df_age["연령구간"].tolist()
 st.sidebar.header("📑 보기")
 view_mode = st.sidebar.radio(
     "무엇을 볼까요?",
-    ["지역별 유병률", "연령별 유병률 추이", "개별 위험요인 비교", "고령화율과의 상관관계"],
+    ["지역별 유병률", "연령별 유병률 추이", "개별 위험요인 비교",
+     "고령화율과의 상관관계", "시/도 × 연령 추정치 (모델)"],
 )
 
 st.divider()
@@ -299,7 +300,7 @@ elif view_mode == "개별 위험요인 비교":
 # =========================================================
 # 화면 4) 고령화율과의 상관관계
 # =========================================================
-else:
+elif view_mode == "고령화율과의 상관관계":
     st.subheader("🔗 지역 고령화율과 대사증후군 유병률의 관계")
 
     df_corr = df_region.dropna(subset=["고령화율", "대사증후군소계_비율"])
@@ -331,6 +332,100 @@ else:
         "💡 상관관계가 있다고 해서 '고령화가 대사증후군을 유발한다'는 인과관계를 "
         "의미하지는 않아요. 지역별 생활습관, 검진 참여율 등 다른 요인도 함께 작용할 수 있어요."
     )
+
+
+# =========================================================
+# 화면 5) 시/도 × 연령 추정치 (모델) — 근사 추정, 실측값 아님!
+# =========================================================
+else:
+    st.subheader("🧮 시/도 × 연령 대사증후군 유병률 — 추정치 (모델)")
+
+    st.error(
+        "🚨 **이 화면의 숫자는 실제로 관측된 값이 아니라, '추정치'입니다.**\n\n"
+        "국민건강보험공단 통계연보에는 '지역별' 유병률과 '연령별' 유병률이 "
+        "각각 따로만 공개되어 있고, 두 기준을 동시에 교차한 표는 없어요. "
+        "그래서 아래 두 가지를 곱하는 단순한 모형으로 추정했습니다.\n\n"
+        "- 지역 배율 = 그 지역의 유병률 ÷ 전국 평균 유병률\n"
+        "- 연령 배율 = 그 연령대의 유병률 ÷ 전국 평균 유병률\n"
+        "- **추정 유병률 = 전국 평균 × 지역 배율 × 연령 배율**\n\n"
+        "이 모형은 '지역 효과'와 '연령 효과'가 서로 독립적으로 작용한다고 "
+        "가정해요. 하지만 실제로는 지역마다 연령 구성이 다르고, 지역 고유의 "
+        "생활습관·환경 요인이 연령대별로 다르게 작용할 수 있어서 — 특히 "
+        "고령 인구 비율이 아주 높거나 낮은 지역에서는 이 추정이 실제와 "
+        "차이가 클 수 있습니다."
+    )
+
+    # --- 전국 평균 유병률(P) 계산 ---
+    national_rate = (
+        df_region_count["대사증후군소계_인원"].sum()
+        / df_region_count["수검자수"].sum()
+        * 100
+    )
+
+    region_multiplier = df_region_count.set_index("지역")["대사증후군소계_비율"] / national_rate
+    age_multiplier = df_age.set_index("연령구간")["대사증후군소계_비율"] / national_rate
+    age_multiplier = age_multiplier.reindex(age_order)  # 나이 순서로 정렬
+
+    # --- 17(지역) x 14(연령) 추정치 행렬 만들기 ---
+    estimate_matrix = np.outer(region_multiplier.values, age_multiplier.values) * national_rate
+    region_list = region_multiplier.index.tolist()
+
+    fig_heat = go.Figure(
+        go.Heatmap(
+            z=estimate_matrix,
+            x=age_order,
+            y=region_list,
+            colorscale="YlOrRd",
+            colorbar=dict(title="추정 유병률(%)"),
+            hovertemplate="%{y} · %{x}<br>추정 유병률: %{z:.1f}%<extra></extra>",
+        )
+    )
+    fig_heat.update_layout(
+        title="시/도 × 연령대 대사증후군 유병률 추정치 (⚠️ 모델 기반 추정값)",
+        xaxis_title="연령대", yaxis_title="지역",
+        template="plotly_white", height=650,
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    st.divider()
+
+    # --- 지역 하나를 골라서, 그 지역의 연령별 추정 곡선 보기 ---
+    st.subheader("📍 지역별 연령 곡선 (추정치)")
+    picked_region = st.selectbox("지역을 선택하세요", region_list)
+
+    region_curve = age_multiplier.values * region_multiplier[picked_region] * national_rate
+    national_curve = age_multiplier.values * national_rate  # 전국 평균 곡선 (비교용)
+
+    fig_line = go.Figure()
+    fig_line.add_trace(
+        go.Scatter(
+            x=age_order, y=region_curve, mode="lines+markers",
+            name=f"{picked_region} (추정치)", line=dict(width=3, color="#E67E22"),
+        )
+    )
+    fig_line.add_trace(
+        go.Scatter(
+            x=age_order, y=national_curve, mode="lines+markers",
+            name="전국 평균 (실측)", line=dict(width=2, color="#7F8C8D", dash="dash"),
+        )
+    )
+    fig_line.update_layout(
+        xaxis_title="연령대", yaxis_title="유병률 (%)",
+        xaxis=dict(categoryorder="array", categoryarray=age_order),
+        template="plotly_white", height=500, hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_line, use_container_width=True)
+
+    st.caption(
+        f"💡 {picked_region}의 지역 배율은 {region_multiplier[picked_region]:.2f}배예요 "
+        f"(전국 평균 대비). 이 배율을 전국 연령별 곡선에 곱해서 추정한 곡선이라, "
+        "실제 그 지역의 연령별 곡선과는 다를 수 있어요."
+    )
+
+    with st.expander("📋 추정치 표 전체 보기"):
+        df_matrix = pd.DataFrame(estimate_matrix, index=region_list, columns=age_order)
+        st.dataframe(df_matrix.style.format("{:.1f}"), use_container_width=True)
 
 st.divider()
 st.caption(
